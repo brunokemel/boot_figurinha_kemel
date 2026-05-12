@@ -4,7 +4,6 @@ import makeWASocket, {
     DisconnectReason  
 } from "@whiskeysockets/baileys";
 
-// imports do MP4 e gif
 import { execFile } from "child_process";
 import fs from "fs";
 import os from "os";
@@ -16,18 +15,25 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+// Opcoes usadas pelo FFmpeg para gerar a figurinha animada.
 type AnimatedStickerOptions = {
   duration: number;
   fps: number;
   quality: number;
 };
 
+// Evita processar a mesma mensagem duas vezes quando o Baileys reenvia eventos.
 const processedMessages = new Set<string>();
+
+// WhatsApp costuma falhar com figurinhas animadas grandes; 1 MB e um limite seguro.
 const MAX_ANIMATED_STICKER_SIZE = 1024 * 1024;
 
 function convertToWebpAnimated(inputPath: string, outputPath: string, options: AnimatedStickerOptions): Promise<void> {
   return new Promise((resolve, reject) => {
+    // Estica o video para preencher 512x512 inteiro, mesmo se deformar um pouco.
     const filter = `fps=${options.fps},scale=512:512:flags=lanczos`;
+
+    // execFile evita montar um comando gigante em string e lida melhor com caminhos.
     const args = [
       "-i", inputPath,
       "-t", String(options.duration),
@@ -51,6 +57,7 @@ function convertToWebpAnimated(inputPath: string, outputPath: string, options: A
 }
 
 async function convertToSmallWebpAnimated(inputPath: string, outputPath: string): Promise<void> {
+    // Primeira tentativa: boa qualidade, mas ja reduzindo duracao e FPS.
     await convertToWebpAnimated(inputPath, outputPath, {
         duration: 6,
         fps: 12,
@@ -59,6 +66,7 @@ async function convertToSmallWebpAnimated(inputPath: string, outputPath: string)
 
     if (fs.statSync(outputPath).size <= MAX_ANIMATED_STICKER_SIZE) return;
 
+    // Segunda tentativa: se ficou pesado, gera de novo menor para o WhatsApp aceitar.
     fs.unlinkSync(outputPath);
     await convertToWebpAnimated(inputPath, outputPath, {
         duration: 4,
@@ -84,11 +92,13 @@ async function startBot() {
     sock.ev.on("connection.update", (update) => {
         const { connection, qr, lastDisconnect} = update;
 
+        // Mostra o QR Code para conectar a conta do WhatsApp.
         if (qr) {
             qrcode.generate(qr, { small: true });
             console.log("Escaneie o QR Code no WhatsApp.");
         }
 
+        // Reconecta automaticamente, menos quando a conta foi deslogada de proposito.
         if(connection === "close") {
             const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
 
@@ -107,10 +117,14 @@ async function startBot() {
        if(!msg.message || msg.key.fromMe) return;
 
        const from = msg.key.remoteJid!;
+
+       // Usa o ID da mensagem para nao responder duas vezes ao mesmo arquivo.
        const messageId = msg.key.id ? `${from}:${msg.key.id}` : "";
        if (messageId) {
             if (processedMessages.has(messageId)) return;
             processedMessages.add(messageId);
+
+            // Mantem a lista pequena para nao crescer para sempre enquanto o bot roda.
             if (processedMessages.size > 1000) {
                 const oldestMessageId = processedMessages.values().next().value;
                 if (oldestMessageId) processedMessages.delete(oldestMessageId);
@@ -119,6 +133,7 @@ async function startBot() {
        const videoMessage = msg.message.videoMessage;
 
         if (videoMessage) {
+            // Arquivos temporarios com nome unico evitam conflito entre mensagens simultaneas.
             const tempId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
             const inputPath = path.join(os.tmpdir(), `boot-figurinha-${tempId}.mp4`);
             const outputPath = path.join(os.tmpdir(), `boot-figurinha-${tempId}.webp`);
@@ -143,6 +158,7 @@ async function startBot() {
                     text: "Não consegui transformar esse vídeo em figurinha animada. Verifique se o FFmpeg está instalado e tente um vídeo menor."
                 });
             } finally {
+                // Limpa os temporarios mesmo quando a conversao falha.
                 if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
                 if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
             }
@@ -161,6 +177,7 @@ async function startBot() {
         
         const buffer = await downloadMediaMessage(msg, "buffer", {}, { logger: P({ level: process.env.LOG_LEVEL || "silent" }), reuploadRequest: sock.updateMediaMessage });
 
+        // Imagem estatica: centraliza em 512x512 mantendo transparencia nas bordas.
         const sticker = await sharp(buffer as Buffer).resize(512, 512, {fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0}}).webp().toBuffer();
         
         await sock.sendMessage(from, {sticker});
